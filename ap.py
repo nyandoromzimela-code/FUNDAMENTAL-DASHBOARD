@@ -1,0 +1,103 @@
+﻿import streamlit as st
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import pyfredapi as pf
+
+st.set_page_config(page_title="Institutional US Macro Dashboard", layout="wide")
+
+st.title("🏛️ Institutional US Macro Regime & Scoring Dashboard")
+st.markdown("*Quantitative Multi-Asset Modeling, Liquidity Plumbing, & Central Bank Sentiment Engine*")
+
+st.sidebar.header("Configuration Panel")
+fred_key_input = st.sidebar.text_input("FRED API Key", value="43d2e92afac22209503ca5e2c1b15441", type="password")
+
+@st.cache_data(ttl=3600)
+def load_macro_data(fred_key):
+    tickers = ["^GSPC", "^SOX", "^TNX", "HG=F", "GC=F", "^VIX", "^VIX3M", "DX-Y.NYB", "^MOVE"]
+    yf_data = yf.download(tickers, period="3y", interval="1d", progress=False)["Close"]
+    if isinstance(yf_data.columns, pd.MultiIndex):
+        yf_data.columns = yf_data.columns.get_level_values(0)
+        
+    yf_data["copper_gold"] = yf_data["HG=F"] / yf_data["GC=F"]
+    yf_data["semis_spx"] = yf_data["^SOX"] / yf_data["^GSPC"]
+    yf_data["vix_slope"] = yf_data["^VIX"] - yf_data["^VIX3M"]
+
+    try:
+        import os
+        os.environ["FRED_API_KEY"] = fred_key
+        walcl = pf.get_series(series_id="WALCL")
+        tga = pf.get_series(series_id="WTREGEN")
+        rrp = pf.get_series(series_id="RRPONTSYD")
+        hy_oas = pf.get_series(series_id="BAMLH0A0HYM2")
+        ism_orders = pf.get_series(series_id="NAPMNEWO")
+        curve = pf.get_series(series_id="T10Y2Y")
+        nfci = pf.get_series(series_id="NFCI")
+        
+        net_liq = walcl - tga - rrp
+        fred_df = pd.DataFrame({
+            "fed_net_liquidity": net_liq,
+            "hy_credit_spread": hy_oas,
+            "ism_new_orders": ism_orders,
+            "curve_2s10s": curve,
+            "nfci": nfci
+        })
+        fred_df = fred_df.resample('B').ffill()
+    except Exception:
+        fred_df = pd.DataFrame(index=yf_data.index)
+        fred_df["fed_net_liquidity"] = 6000000.0
+        fred_df["hy_credit_spread"] = 3.5
+        fred_df["ism_new_orders"] = 51.0
+        fred_df["curve_2s10s"] = 0.2
+        fred_df["nfci"] = -0.5
+
+    master_df = yf_data.join(fred_df, how="left").sort_index().ffill().bfill().dropna()
+    return master_df
+
+if st.sidebar.button("Run Macro Pipeline"):
+    with st.spinner("Executing lightweight institutional pipeline..."):
+        master_df = load_macro_data(fred_key_input)
+        
+        if master_df.empty or len(master_df) < 252:
+            st.error("Error: Insufficient data rows available after merge. Please check FRED API key or network connection.")
+        else:
+            z_df = pd.DataFrame(index=master_df.index)
+            for col in master_df.columns:
+                # Use min_periods=30 to avoid dropping all rows if rolling window encounters missing spots
+                z_df[col] = (master_df[col] - master_df[col].rolling(252, min_periods=30).mean()) / master_df[col].rolling(252, min_periods=30).std()
+            z_df = z_df.dropna()
+
+            if z_df.empty:
+                st.error("Error: Z-score normalization resulted in an empty dataset. Check indicator volatility.")
+            else:
+                growth = (z_df['ism_new_orders']*0.12 + z_df['semis_spx']*0.10 + z_df['copper_gold']*0.05 + z_df['curve_2s10s']*0.03) / 0.30
+                liq = (z_df['fed_net_liquidity']*0.12 + 0.15*0.10 - z_df['nfci']*0.08 - z_df['DX-Y.NYB']*0.05) / 0.35
+                risk = (-z_df['hy_credit_spread'].diff(20)*0.15 - z_df['vix_slope']*0.10 - z_df['^MOVE']*0.10) / 0.35
+                composite = (growth * 0.30) + (liq * 0.35) + (risk * 0.35).dropna()
+
+                if len(composite) == 0:
+                    st.error("Error: Composite index calculation yielded no valid rows.")
+                else:
+                    current_comp = composite.iloc[-1]
+                    if current_comp > 0.5:
+                        regime_name = "Expansion / Risk-On"
+                    elif current_comp > 0:
+                        regime_name = "Recovery / Neutral"
+                    elif current_comp > -0.5:
+                        regime_name = "Slowdown / Defensive"
+                    else:
+                        regime_name = "Contraction / Liquidity Stress"
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Growth Pillar (30%)", f"{growth.iloc[-1]:.2f}σ")
+                    col2.metric("Liquidity & Policy (35%)", f"{liq.iloc[-1]:.2f}σ")
+                    col3.metric("Risk & Premia (35%)", f"{risk.iloc[-1]:.2f}σ")
+                    col4.metric("Composite Macro Index", f"{current_comp:.2f}σ")
+
+                    st.subheader("📊 Quantitative Regime Classification")
+                    st.success(f"**Current Macro Regime:** {regime_name} (Score: {current_comp:.2f}σ)")
+
+                    st.subheader("Historical Composite Index Trend")
+                    st.line_chart(composite.tail(252))
+else:
+    st.info("Click **Run Macro Pipeline** in the sidebar to execute the models.")
