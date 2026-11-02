@@ -3,5 +3,3 @@ pandas
 numpy
 yfinance
 pyfredapi
-scikit-learn
-hmmlearn
