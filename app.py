@@ -3,18 +3,15 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import pyfredapi as pf
-from hmmlearn.hmm import GaussianHMM
 
 st.set_page_config(page_title="Institutional US Macro Dashboard", layout="wide")
 
 st.title("🏛️ Institutional US Macro Regime & Scoring Dashboard")
 st.markdown("*Quantitative Multi-Asset Modeling, Liquidity Plumbing, & Central Bank Sentiment Engine*")
 
-# Sidebar Controls
 st.sidebar.header("Configuration Panel")
 fred_key_input = st.sidebar.text_input("FRED API Key", value="43d2e92afac22209503ca5e2c1b15441", type="password")
 
-# Cached data loading function with robust fallback safeguards
 @st.cache_data(ttl=3600)
 def load_macro_data(fred_key):
     tickers = ["^GSPC", "^SOX", "^TNX", "HG=F", "GC=F", "^VIX", "^VIX3M", "DX-Y.NYB", "^MOVE"]
@@ -58,11 +55,11 @@ def load_macro_data(fred_key):
     return master_df
 
 if st.sidebar.button("Run Macro Pipeline"):
-    with st.spinner("Executing optimized institutional pipeline..."):
+    with st.spinner("Executing lightweight institutional pipeline..."):
         master_df = load_macro_data(fred_key_input)
         
         if master_df.empty or len(master_df) < 252:
-            st.error("Error: Insufficient data rows available after merge. Please verify API connection.")
+            st.error("Error: Insufficient data rows available after merge.")
         else:
             z_df = pd.DataFrame(index=master_df.index)
             for col in master_df.columns:
@@ -74,11 +71,16 @@ if st.sidebar.button("Run Macro Pipeline"):
             risk = (-z_df['hy_credit_spread'].diff(20)*0.15 - z_df['vix_slope']*0.10 - z_df['^MOVE']*0.10) / 0.35
             composite = (growth * 0.30) + (liq * 0.35) + (risk * 0.35)
 
-            feat_hmm = pd.DataFrame({'eq_ret': master_df['^GSPC'].pct_change(), 'rate': master_df['^TNX'].diff(), 'vix': master_df['^VIX']}).dropna()
-            X_hmm = (feat_hmm - feat_hmm.mean()) / feat_hmm.std()
-            hmm = GaussianHMM(n_components=4, covariance_type="full", n_iter=100, random_state=42).fit(X_hmm.values)
-            states = hmm.predict(X_hmm.values)
-            probs = hmm.predict_proba(X_hmm.values[-1:])
+            # Lightweight Vectorized Regime Classification (Zero CPU Overhead)
+            current_comp = composite.iloc[-1]
+            if current_comp > 0.5:
+                regime_name = "Expansion / Risk-On"
+            elif current_comp > 0:
+                regime_name = "Recovery / Neutral"
+            elif current_comp > -0.5:
+                regime_name = "Slowdown / Defensive"
+            else:
+                regime_name = "Contraction / Liquidity Stress"
 
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Growth Pillar (30%)", f"{growth.iloc[-1]:.2f}σ")
@@ -86,11 +88,8 @@ if st.sidebar.button("Run Macro Pipeline"):
             col3.metric("Risk & Premia (35%)", f"{risk.iloc[-1]:.2f}σ")
             col4.metric("Composite Macro Index", f"{composite.iloc[-1]:.2f}σ")
 
-            st.subheader("📊 HMM Regime Probability State")
-            st.write(f"**Current Active State:** State {states[-1]}")
-            prob_df = pd.DataFrame(probs, columns=[f"State {i}" for i in range(4)]).T
-            prob_df.columns = ["Probability"]
-            st.bar_chart(prob_df)
+            st.subheader("📊 Quantitative Regime Classification")
+            st.success(f"**Current Macro Regime:** {regime_name} (Score: {current_comp:.2f}σ)")
 
             st.subheader("Historical Composite Index Trend")
             st.line_chart(composite.tail(252))
