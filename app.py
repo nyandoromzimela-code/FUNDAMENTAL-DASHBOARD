@@ -14,7 +14,7 @@ st.markdown("*Quantitative Multi-Asset Modeling, Liquidity Plumbing, & Central B
 st.sidebar.header("Configuration Panel")
 fred_key_input = st.sidebar.text_input("FRED API Key", value="43d2e92afac22209503ca5e2c1b15441", type="password")
 
-# Caching the heavy data loading and processing so it doesn't spike CPU
+# Cached data loading function with robust fallback safeguards
 @st.cache_data(ttl=3600)
 def load_macro_data(fred_key):
     tickers = ["^GSPC", "^SOX", "^TNX", "HG=F", "GC=F", "^VIX", "^VIX3M", "DX-Y.NYB", "^MOVE"]
@@ -45,50 +45,54 @@ def load_macro_data(fred_key):
             "curve_2s10s": curve,
             "nfci": nfci
         })
+        fred_df = fred_df.resample('B').ffill()
     except Exception:
         fred_df = pd.DataFrame(index=yf_data.index)
-        fred_df["fed_net_liquidity"] = 6000000
+        fred_df["fed_net_liquidity"] = 6000000.0
         fred_df["hy_credit_spread"] = 3.5
         fred_df["ism_new_orders"] = 51.0
         fred_df["curve_2s10s"] = 0.2
         fred_df["nfci"] = -0.5
 
-    master_df = yf_data.join(fred_df, how="outer").sort_index().ffill().dropna()
+    master_df = yf_data.join(fred_df, how="left").sort_index().ffill().bfill().dropna()
     return master_df
 
 if st.sidebar.button("Run Macro Pipeline"):
     with st.spinner("Executing optimized institutional pipeline..."):
         master_df = load_macro_data(fred_key_input)
         
-        z_df = pd.DataFrame(index=master_df.index)
-        for col in master_df.columns:
-            z_df[col] = (master_df[col] - master_df[col].rolling(252).mean()) / master_df[col].rolling(252).std()
-        z_df = z_df.dropna()
+        if master_df.empty or len(master_df) < 252:
+            st.error("Error: Insufficient data rows available after merge. Please verify API connection.")
+        else:
+            z_df = pd.DataFrame(index=master_df.index)
+            for col in master_df.columns:
+                z_df[col] = (master_df[col] - master_df[col].rolling(252).mean()) / master_df[col].rolling(252).std()
+            z_df = z_df.dropna()
 
-        growth = (z_df['ism_new_orders']*0.12 + z_df['semis_spx']*0.10 + z_df['copper_gold']*0.05 + z_df['curve_2s10s']*0.03) / 0.30
-        liq = (z_df['fed_net_liquidity']*0.12 + 0.15*0.10 - z_df['nfci']*0.08 - z_df['DX-Y.NYB']*0.05) / 0.35
-        risk = (-z_df['hy_credit_spread'].diff(20)*0.15 - z_df['vix_slope']*0.10 - z_df['^MOVE']*0.10) / 0.35
-        composite = (growth * 0.30) + (liq * 0.35) + (risk * 0.35)
+            growth = (z_df['ism_new_orders']*0.12 + z_df['semis_spx']*0.10 + z_df['copper_gold']*0.05 + z_df['curve_2s10s']*0.03) / 0.30
+            liq = (z_df['fed_net_liquidity']*0.12 + 0.15*0.10 - z_df['nfci']*0.08 - z_df['DX-Y.NYB']*0.05) / 0.35
+            risk = (-z_df['hy_credit_spread'].diff(20)*0.15 - z_df['vix_slope']*0.10 - z_df['^MOVE']*0.10) / 0.35
+            composite = (growth * 0.30) + (liq * 0.35) + (risk * 0.35)
 
-        feat_hmm = pd.DataFrame({'eq_ret': master_df['^GSPC'].pct_change(), 'rate': master_df['^TNX'].diff(), 'vix': master_df['^VIX']}).dropna()
-        X_hmm = (feat_hmm - feat_hmm.mean()) / feat_hmm.std()
-        hmm = GaussianHMM(n_components=4, covariance_type="full", n_iter=100, random_state=42).fit(X_hmm.values)
-        states = hmm.predict(X_hmm.values)
-        probs = hmm.predict_proba(X_hmm.values[-1:])
+            feat_hmm = pd.DataFrame({'eq_ret': master_df['^GSPC'].pct_change(), 'rate': master_df['^TNX'].diff(), 'vix': master_df['^VIX']}).dropna()
+            X_hmm = (feat_hmm - feat_hmm.mean()) / feat_hmm.std()
+            hmm = GaussianHMM(n_components=4, covariance_type="full", n_iter=100, random_state=42).fit(X_hmm.values)
+            states = hmm.predict(X_hmm.values)
+            probs = hmm.predict_proba(X_hmm.values[-1:])
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Growth Pillar (30%)", f"{growth.iloc[-1]:.2f}σ")
-        col2.metric("Liquidity & Policy (35%)", f"{liq.iloc[-1]:.2f}σ")
-        col3.metric("Risk & Premia (35%)", f"{risk.iloc[-1]:.2f}σ")
-        col4.metric("Composite Macro Index", f"{composite.iloc[-1]:.2f}σ")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Growth Pillar (30%)", f"{growth.iloc[-1]:.2f}σ")
+            col2.metric("Liquidity & Policy (35%)", f"{liq.iloc[-1]:.2f}σ")
+            col3.metric("Risk & Premia (35%)", f"{risk.iloc[-1]:.2f}σ")
+            col4.metric("Composite Macro Index", f"{composite.iloc[-1]:.2f}σ")
 
-        st.subheader("📊 HMM Regime Probability State")
-        st.write(f"**Current Active State:** State {states[-1]}")
-        prob_df = pd.DataFrame(probs, columns=[f"State {i}" for i in range(4)]).T
-        prob_df.columns = ["Probability"]
-        st.bar_chart(prob_df)
+            st.subheader("📊 HMM Regime Probability State")
+            st.write(f"**Current Active State:** State {states[-1]}")
+            prob_df = pd.DataFrame(probs, columns=[f"State {i}" for i in range(4)]).T
+            prob_df.columns = ["Probability"]
+            st.bar_chart(prob_df)
 
-        st.subheader("Historical Composite Index Trend")
-        st.line_chart(composite.tail(252))
+            st.subheader("Historical Composite Index Trend")
+            st.line_chart(composite.tail(252))
 else:
     st.info("Click **Run Macro Pipeline** in the sidebar to execute the models.")
